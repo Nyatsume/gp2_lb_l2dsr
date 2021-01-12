@@ -8,6 +8,7 @@
 struct pkt_meta {
   __be32 src;
   __be32 dst;
+  __u16 proto;
   union {
     __u32 ports;
     __u32 port16[2];
@@ -20,15 +21,23 @@ struct {
   __uint(max_entries, MAX_SERVERS);
 } dst_server SEC(".maps");
 
+BPF_ARRAY(dst_server, u64, MAX_SERVERS);
+BPF_HASH_OF_MAPS(maps_hash, "dst_server", MAX_SERVERS);
+
 
 static void hash_get_dest(struct pkt_meta *pkt)
 {
-  __u32 key;
+  __u32 map_key, dserver_key;
   __u8 dmac[6];
+  void *inner_map;
 
-  key = jhash_2words(pkt->src, pkt->ports, MAX_SERVERS) % MAX_SERVERS;
+  map_key = jhash_3words(pkt->dst, pkt->port16[1], pkt->proto, MAX_SERVERS) % MAX_SERVERS;
 
- memcpy(dmac, bpf_lookup_elem(&dst_server, &key), sizeof(uint8_t) * 6);
+  inner_map = maps_hash.lookup(&map_key);
+  dserver_key = jhash_2words(pkt->src, pkt->port16[0], MAX_SERVERS) % MAX_SERVERS;
+
+
+ memcpy(dmac, bpf_lookup_elem(inner_map, &dserver_key), sizeof(uint8_t) * 6);
 }
 
 static void swapmac(struct ethhdr *eth, __u8 dmac[6])
@@ -87,13 +96,14 @@ int process_packet(struct xdp_md *ctx)
   iph = data + nh_off;
   if (iph + 1 > data_end)
     return XDP_DROP;
-/*  if (iph->ihl != 5)
-      return XDP_DROP; */
-  protocol = iph->protocol;
+  if (iph->ihl != 5)
+      return XDP_DROP; 
+  h_proto = iph->protocol;
   nh_off += sizeof(struct iphdr);
 
   pkt.src = iph->saddr;
   pkt.dst = iph->daddr;
+  pkt.proto = h_proto;
 
   if (protocol == IPPROTO_TCP) {
     if (!parse_tcp(data, nh_off, data_end, &pkt))
@@ -113,7 +123,7 @@ swapmac(eth, dmac);
 // ingress portの判別で書き換え対象を変更する場合はswapmac()側で書く
 
 return XDP_TX;
-
+}
 
 
 
